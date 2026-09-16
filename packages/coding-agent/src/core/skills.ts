@@ -543,6 +543,7 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 					});
 					continue;
 				}
+				log.info("skill endorsed", { name: skill.name, reason: endorsement.reason });
 			}
 
 			const existing = skillMap.get(skill.name);

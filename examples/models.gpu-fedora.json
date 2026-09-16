@@ -1,0 +1,13 @@
+{
+  "providers": {
+    "gpu-fedora": {
+      "baseUrl": "http://100.65.241.73:11434/v1",
+      "api": "openai-completions",
+      "apiKey": "GPU_FEDORA_API_KEY",
+      "models": [
+        {"id": "qwen2.5-coder:14b-8k", "contextWindow": 8192, "maxTokens": 2048},
+        {"id": "deepseek-r1:14b", "contextWindow": 8192, "maxTokens": 2048}
+      ]
+    }
+  }
+}

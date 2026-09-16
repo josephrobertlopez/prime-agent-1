@@ -95,3 +95,22 @@ bridge error (`licensed: true`, reason prefixed
 someone else's runtime — refusing all skills when python is absent would brick
 the agent. With `AGENT_OPS_ENFORCE=1` (the only mode in which the loader calls
 it), the same errors fail CLOSED instead.
+
+## Driver recipe: VERIFIED LIVE (2026-09-16)
+
+A real prime-agent session ran locally with all three properties confirmed:
+no Prime login (isolated dir self-created empty `auth.json`), endorsement
+gate firing in-session (12 refusals logged with real DB reasons; licensed
+skill loaded), completion served by the local GPU box.
+
+- Config dir: `~/.prime/agent/` (override: `PRIME_AGENT_CODING_AGENT_DIR`).
+- `models.json` (schema: `core/model-registry.ts` validateConfig): see
+  `examples/models.gpu-fedora.json`. `apiKey` is an env-var NAME resolved at
+  registry load; the local endpoint ignores the value.
+- Skills dirs: `<agentDir>/skills` + `<cwd>/.prime/agent/skills`; symlinks work.
+- One-shot: `dist/bundle/cli.js -p "prompt" --provider gpu-fedora --model <pattern>`.
+- Enforced session env: `AGENT_OPS_ENFORCE=1 AGENT_OPS_DB=<agent_ops.db>
+  PYTHONPATH=<this repo root>`.
+- Build: `npm run build` at repo ROOT (per-package build needs sibling dists).
+- Known gap: loaded skills log nothing (only refusals warn) — a positive
+  `skill endorsed` info line in skills.ts would give audit parity.
