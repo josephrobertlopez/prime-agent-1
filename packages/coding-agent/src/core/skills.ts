@@ -6,6 +6,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "pat
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
 import { canonicalizePath } from "../utils/paths.js";
+import { checkEndorsement, isEndorsementEnforced } from "./agent-ops-endorsement.js";
 import type { ResourceDiagnostic } from "./diagnostics.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 
@@ -529,6 +530,19 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 
 			if (realPathSet.has(realPath)) {
 				continue;
+			}
+
+			if (isEndorsementEnforced()) {
+				const endorsement = checkEndorsement(skill.name);
+				if (!endorsement.licensed) {
+					log.warn("skill not endorsed", { name: skill.name, reason: endorsement.reason });
+					allDiagnostics.push({
+						type: "warning",
+						message: `skill "${skill.name}" not endorsed by agent-ops: ${endorsement.reason}`,
+						path: skill.filePath,
+					});
+					continue;
+				}
 			}
 
 			const existing = skillMap.get(skill.name);
