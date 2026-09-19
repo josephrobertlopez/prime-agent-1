@@ -1,0 +1,51 @@
+name: agent-ops adapter tests
+
+on:
+  pull_request:
+    paths:
+      - 'agent_ops_adapter/**'
+      - '.github/workflows/agent-ops-adapter.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'agent_ops_adapter/**'
+
+permissions: {}
+
+jobs:
+  test:
+    name: pytest agent_ops_adapter
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout prime-agent
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # agent_ops_adapter/ bridges into the agent-ops repo (a real Python
+      # package this repo does not vendor). This is a private repo, so a
+      # cross-repo checkout requires AGENT_OPS_PAT (a fine-grained PAT with
+      # read access to josephrobertlopez/agent-ops) configured as a repo
+      # secret before this job can pass -- it will fail closed (checkout
+      # error) until that secret exists, rather than silently skip.
+      - name: Checkout agent-ops
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: josephrobertlopez/agent-ops
+          token: ${{ secrets.AGENT_OPS_PAT }}
+          path: agent-ops-src
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install agent-ops (editable)
+        run: pip install -e ./agent-ops-src
+
+      - name: Install test dependencies
+        run: pip install pytest pyyaml
+
+      - name: Test
+        run: python3 -m pytest agent_ops_adapter/ -v

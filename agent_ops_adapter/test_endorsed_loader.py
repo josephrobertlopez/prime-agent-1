@@ -30,8 +30,19 @@ def temp_db():
         yield str(db_file)
 
 
-def test_silver_skill_with_endorsed_version_is_licensed(temp_db):
+def test_silver_skill_with_endorsed_version_is_licensed(temp_db, monkeypatch, tmp_path):
     """Green: skill with passing green, version, and PASS verdict -> licensed when conditions met."""
+    # derive_grade() is bronze-by-construction ("no eval.yaml") for any skill
+    # name that doesn't exist under agent_ops.resolve.SKILLS_DIR -- a real
+    # eval.yaml must exist for "test-skill" for grade to ever clear bronze,
+    # regardless of how many perf_checks/skill_versions rows are inserted.
+    from agent_ops import resolve as resolve_module
+
+    skill_dir = tmp_path / "test-skill"
+    skill_dir.mkdir()
+    (skill_dir / "eval.yaml").write_text("tasks: []\n")
+    monkeypatch.setattr(resolve_module, "SKILLS_DIR", str(tmp_path))
+
     conn = sqlite3.connect(temp_db)
 
     # Insert a passing green row (direct_score=1.0)
@@ -50,12 +61,15 @@ def test_silver_skill_with_endorsed_version_is_licensed(temp_db):
         ("test-skill", "abc123def456", "/skills/test-skill/workflow.yaml", "2026-09-15T00:00:00"),
     )
 
-    # Insert a PASS verdict for that version
+    # Insert a PASS verdict for that version. model_version_candidate must
+    # match version_hash exactly -- resolve()'s endorsement contract only
+    # endorses the version the verdict was actually earned on (Finding B,
+    # 2026-09-16), never a merely-latest hash.
     conn.execute(
         """INSERT INTO qualification_verdicts
         (experiment_id, skill_name, verdict, sample_size, model_version_baseline, model_version_candidate, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        ("exp-1", "test-skill", "PASS", 10, "v0", "v1", "2026-09-15T00:00:00"),
+        ("exp-1", "test-skill", "PASS", 10, "v0", "abc123def456", "2026-09-15T00:00:00"),
     )
     conn.commit()
 
@@ -158,11 +172,13 @@ def test_both_conditions_must_hold_for_license(temp_db):
 
     result = load_endorsed("both-check-skill", db_path=temp_db)
 
-    # Defensive logic: both grade AND endorsed_version must be good
-    # Here: grade=bronze, version exists → should be licensed=False
+    # Defensive logic: grade gates endorsement entirely (Finding A,
+    # 2026-09-16 hardening) -- a bronze skill gets endorsed_version=None
+    # unconditionally, not merely licensed=False. This is stronger than
+    # "version exists but unlicensed": bronze never carries a version at all.
     assert result["grade"] == "bronze", f"expected bronze, got {result['grade']}"
-    assert result["version"] is not None, "expected version to exist"
-    assert result["licensed"] is False, "expected licensed=False (grade is bronze despite having version)"
+    assert result["version"] is None, "expected version=None for bronze (grade gates endorsement, not just licensing)"
+    assert result["licensed"] is False, "expected licensed=False (grade is bronze)"
 
 
 if __name__ == "__main__":
