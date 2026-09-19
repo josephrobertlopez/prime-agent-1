@@ -252,3 +252,13 @@ git pull --rebase && git push
 ### User override
 
 If the user instructions conflict with rules set out here, ask for confirmation that they want to override the rules. Only then execute their instructions.
+
+## Fork-Specific Notes
+
+This fork integrates [agent-ops](https://github.com/josephrobertlopez/agent-ops)
+as an external skill-verification layer. See `AGENTOPS.md` at the repo root
+for the two-layer contract (endorse-before-load trust gate +
+max-local-compute profile), including its documented known gaps (no
+"skill endorsed" audit-parity log line; `agent_ops_adapter/`'s own test
+suite is not wired into CI). See `assessments/` for AI literacy assessment
+history.

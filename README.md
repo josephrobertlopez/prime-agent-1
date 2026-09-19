@@ -28,6 +28,9 @@ Prime Agent: A Self-Improving RLM Harness
   <a href="https://arxiv.org/abs/2608.23552">
     <img src="https://img.shields.io/badge/arXiv-2608.23552-b31b1b.svg" alt="arXiv" />
   </a>
+  <a href="assessments/2026-09-18-assessment.md">
+    <img src="https://img.shields.io/badge/AI_Literacy-Level_3_Habitat_Engineering-20B2AA?style=flat-square" alt="AI Literacy" />
+  </a>
 </p>
 
 <p align="center">
