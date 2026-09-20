@@ -21,3 +21,7 @@
 *.gz binary
 *.woff binary
 *.woff2 binary
+
+# Reflection surfaces: union merge so concurrent reflections are never silently dropped
+REFLECTION_LOG.md merge=union
+reflections/archive/*.md merge=union

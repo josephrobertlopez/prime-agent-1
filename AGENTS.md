@@ -262,3 +262,93 @@ max-local-compute profile), including its documented known gaps (no
 "skill endorsed" audit-parity log line; `agent_ops_adapter/`'s own test
 suite is not wired into CI). See `assessments/` for AI literacy assessment
 history.
+
+<!-- ===== BEGIN local habitat block (added 2026-09-19 by /superpowers-init) =====
+     One contiguous, local-only block so an upstream rebase can drop it whole.
+     The AI-literacy framework expects five specifically-named sections. This
+     repo already covers three of them under upstream's own headings, so those
+     entries POINT at the existing sections rather than restating them --
+     duplicating upstream prose would create merge churn and two sources of
+     truth. Only genuinely-absent content is written out in full below. -->
+
+## STYLE
+
+See **Conversational Style** and **Code Quality** above — upstream's headings own
+this concern. Nothing is restated here on purpose.
+
+## TEST_STRATEGY
+
+See **Testing Prime Agent Interactive Mode with tmux** and **Commands** above for
+the mechanics. Two additions specific to this fork:
+
+- `npm run check` (biome + `tsgo --noEmit`) is the only constraint in `HARNESS.md`
+  with real deterministic enforcement today. Run it before every commit.
+- `agent_ops_adapter/`'s own test suite is **not wired into CI** (noted in
+  Fork-Specific Notes above). Treat it as locally-verified only.
+
+## ARCH_DECISIONS
+
+See **Adding a New LLM Provider**, **Daemon Protocol Changes**, and **Releasing**
+above for upstream's architecture. Fork-level decision, recorded here because it has
+no upstream equivalent:
+
+- **This repo is the LOCUS layer** of `Claude → prime-agent → agent-ops → conductor
+  → DB receipt`. Its defining property is that **a session must not be able to
+  declare itself finished** — completion is decided by an `--autonomous-gate`
+  external to the session. Any change that lets a session self-certify is wrong
+  regardless of convenience. Full treatment in `HARNESS.md`.
+
+## DESIGN_DECISIONS
+
+- **`HARNESS.md` lives at the repo root**, not `.claude/`, deviating from the
+  framework default, so one audit gate reads `HARNESS.md` identically across the
+  three repos in the chain (monorepo-v2, agent-ops, prime-agent).
+- **The five generic pipeline agents** (orchestrator, spec-writer, tdd-agent,
+  code-reviewer, integration-agent) were deliberately **not** installed. They are
+  spec-first application-pipeline scaffolding; this is a vendored fork whose diffs
+  go upstream, so they would be churn rather than habitat.
+- **Budgets are denominated in tokens, not dollars**, because no CLI path to
+  per-session cost exists (see GOTCHAS). `MODEL_ROUTING.md` carries the conversion
+  as an explicit upper bound, never as an estimate of real spend.
+
+## GOTCHAS
+
+Compound learning. Each entry below was verified by real invocation on 2026-09-19,
+not inferred from source. Re-verify after an upstream merge rather than trusting the
+list.
+
+1. **`daemon` is NOT a public verb** — removed upstream. `prime-agent daemon stats`
+   and `daemon list` do not exist, so **there is no CLI path to per-session cost.**
+   Reading the TypeScript `SessionUsageSummary` interface proves the *type* exists,
+   not that the CLI exposes it — that exact inference was made during this session
+   and was wrong. Do not build tooling that assumes the verb.
+2. **Cost is readable only from session transcripts.** `prime-agent list --all
+   --json` returns sessions with **no `usage` block** (confirmed across 119
+   sessions). `~/.prime/agent/sessions/<id>.jsonl` does carry `usage`, `cost`, and
+   `totalTokens`. That file is the only honest source.
+3. **Programmatic session creation needs top-level await.** The only path in is
+   `handleDaemonCommand(["daemon","create",name])` from
+   `./packages/coding-agent/dist/cli/daemon-command.js` — hence `create-session.mts`
+   being `.mts`. The importable package is `@earendil-works/pi-coding-agent`, **not**
+   `@earendil-works/pi-agent-core` (that path does not exist).
+4. **`dist/` must be built first** — `create-session.mts` imports from
+   `packages/coding-agent/dist/`, so a fresh clone needs `npm run build` before it
+   works.
+5. **Paid inference fails with a hard `402 — would exceed your available credits`,**
+   discovered only on failure. `--autonomous-max-tokens/-turns/-continuations/
+   -timeout-ms` bound tokens, turns, and time; **nothing bounds dollars locally.**
+   Check the provider balance before a multi-worker fan-out — a mid-run 402 looks
+   like a task failure and is not.
+6. **`--autonomous-max-tokens` excludes `cacheRead`** — it counts
+   `input + output + cacheWrite`. Cached context replayed each turn would otherwise
+   exhaust a verifier loop's budget before real work landed.
+7. **A gate inside the worker's writable tree is not a gate.** Point
+   `--autonomous-gate` at a command outside `--cwd`, or the session can weaken its
+   own judge and the completion check silently degrades into a self-report.
+8. **`gitleaks` is not installed on this machine** — so "No secrets in source" is
+   declared `unverified` in `HARNESS.md`, not `deterministic`. This repo handles
+   provider credentials (`--api-key`, `~/.prime/agent/auth.json`), so the blast
+   radius is above average; installing the scanner is the highest-value promotion
+   available.
+
+<!-- ===== END local habitat block ===== -->
