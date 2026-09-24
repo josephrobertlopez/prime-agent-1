@@ -48,6 +48,8 @@ export interface AgentAutonomousStatus {
 	lastGateFailure?: AgentAutonomousGateFailure;
 	/** Configured subagent keep-alive window; 0 disables the keep-alive valve. */
 	subagentKeepAliveMs?: number;
+	/** Set once a budget bound actually stopped the run; undefined while running. */
+	halt?: AutonomousHaltRecord;
 }
 
 export const DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT =
@@ -112,10 +114,46 @@ export interface AutonomousRuntimeState {
 	lastGateFailureSnapshot?: GitWorktreeSnapshot;
 	/** Configured subagent keep-alive window; 0 disables the keep-alive valve. */
 	subagentKeepAliveMs: number;
+	/** Set once a budget bound actually stopped the run; undefined while running. */
+	halt?: AutonomousHaltRecord;
 }
 
 export type AutonomousLimitReason = "maxContinuations" | "maxTurns" | "maxTokens" | "timeoutMs";
 export type AutonomousGateResult = "passed" | "failed" | "retry_exhausted";
+
+/**
+ * Stable, host-facing halt labels. These are what a supervising process greps
+ * for in the session transcript, so they must not drift with internal limit
+ * field names.
+ */
+export type AutonomousHaltLabel = "continuation_cap" | "turn_cap" | "token_cap" | "timeout";
+
+export const AUTONOMOUS_HALT_LABELS: Record<AutonomousLimitReason, AutonomousHaltLabel> = {
+	maxContinuations: "continuation_cap",
+	maxTurns: "turn_cap",
+	maxTokens: "token_cap",
+	timeoutMs: "timeout",
+};
+
+/** Custom-message type under which a halt is persisted to the session transcript. */
+export const AUTONOMOUS_HALT_CUSTOM_TYPE = "autonomous_halt";
+
+/**
+ * A recorded budget halt. Persisted to `~/.prime/agent/sessions/<id>.jsonl`
+ * because the process exit code alone cannot distinguish a turn cap from a
+ * token cap from a wall-clock timeout, and the transcript is the only durable
+ * readback surface this CLI exposes.
+ */
+export interface AutonomousHaltRecord {
+	reason: AutonomousLimitReason;
+	label: AutonomousHaltLabel;
+	haltedAt: number;
+	elapsedMs: number;
+	continuationsUsed: number;
+	turnsUsed: number;
+	tokensUsed: number;
+	limits: Required<Omit<AgentAutonomousConfig, "enabled" | "continuationPrompt" | "gates" | "subagentKeepAliveMs">>;
+}
 
 type AutonomousLimitState = Pick<
 	AgentAutonomousStatus,
@@ -209,6 +247,9 @@ export function setAutonomousEnabled(
 		state.gateAttempts = {};
 		state.lastGateFailure = undefined;
 		state.lastGateFailureSnapshot = undefined;
+		// Re-enabling starts a fresh budget, so a halt from the previous run must
+		// not make the new one look pre-stopped.
+		state.halt = undefined;
 	} else {
 		state.startedAt = undefined;
 		state.gateAttempts = {};
@@ -257,7 +298,51 @@ export function autonomousStatus(state: AutonomousRuntimeState): AgentAutonomous
 		gateAttempts: { ...state.gateAttempts },
 		lastGateFailure: state.lastGateFailure ? { ...state.lastGateFailure } : undefined,
 		subagentKeepAliveMs: state.subagentKeepAliveMs,
+		halt: state.halt ? { ...state.halt, limits: { ...state.halt.limits } } : undefined,
 	};
+}
+
+/**
+ * Record the first budget bound that stopped this run. Idempotent: the first
+ * halt wins, so a later bound crossed during teardown cannot overwrite the
+ * reason the run actually stopped.
+ *
+ * Returns the record when this call is what set it, `undefined` when a halt
+ * was already recorded — callers use that to write the transcript entry once.
+ */
+export function recordAutonomousHalt(
+	state: AutonomousRuntimeState,
+	reason: AutonomousLimitReason,
+	now = Date.now(),
+): AutonomousHaltRecord | undefined {
+	if (state.halt) {
+		return undefined;
+	}
+	const record: AutonomousHaltRecord = {
+		reason,
+		label: AUTONOMOUS_HALT_LABELS[reason],
+		haltedAt: now,
+		elapsedMs: state.startedAt === undefined ? 0 : Math.max(0, now - state.startedAt),
+		continuationsUsed: state.continuationsUsed,
+		turnsUsed: state.turnsUsed,
+		tokensUsed: state.tokensUsed,
+		limits: { ...state.limits },
+	};
+	state.halt = record;
+	return record;
+}
+
+/** Human-readable one-liner used for the transcript entry's `content`. */
+export function formatAutonomousHalt(record: AutonomousHaltRecord): string {
+	const detail =
+		record.reason === "maxTurns"
+			? `turns ${record.turnsUsed}/${record.limits.maxTurns}`
+			: record.reason === "maxTokens"
+				? `tokens ${record.tokensUsed}/${record.limits.maxTokens}`
+				: record.reason === "maxContinuations"
+					? `continuations ${record.continuationsUsed}/${record.limits.maxContinuations}`
+					: `elapsed ${record.elapsedMs}ms/${record.limits.timeoutMs}ms`;
+	return `[autonomous-halt: ${record.label}] run stopped by ${record.reason} (${detail}).`;
 }
 
 export function addAutonomousUsage(state: AutonomousRuntimeState, usage: Usage | undefined): void {
@@ -279,10 +364,12 @@ function autonomousTokenDelta(usage: Usage | undefined): number {
 	if (!usage) {
 		return 0;
 	}
-	// Cache-read tokens are repeated context served from provider cache. Counting them
-	// cumulatively makes long autonomous verifier loops exhaust their host-side token
-	// budget far before the non-cached work reaches the configured cap.
-	return usage.input + usage.output + usage.cacheWrite;
+	// Cache-read tokens ARE billed by the provider (per prime-agent session transcripts
+	// and provider pricing), so they MUST count against the autonomous budget cap. The
+	// previous exclusion caused the cap arithmetic to diverge from actual billing:
+	// a 600k-token cap permitted 2.38M billed tokens when cacheRead dominated the run.
+	// This fix ensures the cap binds correctly to what the provider actually charges.
+	return usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
 }
 
 export async function nextAutonomousContinuation(

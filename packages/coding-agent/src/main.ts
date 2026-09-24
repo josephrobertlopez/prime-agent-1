@@ -1635,6 +1635,7 @@ export async function main(args: string[], options?: MainOptions) {
 			messages: parsed.messages,
 			initialMessage,
 			initialImages,
+			hardTimeoutMs: parsed.autonomousTimeoutMs,
 		});
 		stopThemeWatcher();
 		restoreStdout();
@@ -1761,6 +1762,7 @@ export async function main(args: string[], options?: MainOptions) {
 			messages: parsed.messages,
 			initialMessage,
 			initialImages,
+			hardTimeoutMs: parsed.autonomousTimeoutMs,
 		});
 		stopThemeWatcher();
 		restoreStdout();

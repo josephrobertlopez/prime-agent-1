@@ -83,6 +83,8 @@ import type { AuthSourceToken } from "./auth-storage.js";
 import {
 	type AgentAutonomousConfig,
 	type AgentAutonomousStatus,
+	AUTONOMOUS_HALT_CUSTOM_TYPE,
+	type AutonomousLimitReason,
 	type AutonomousRuntimeState,
 	addAutonomousContinuation,
 	addAutonomousUsage,
@@ -92,9 +94,11 @@ import {
 	createAutonomousGateFailureContinuationMessage,
 	createAutonomousRuntimeState,
 	createAutonomousSubagentKeepAliveMessage,
+	formatAutonomousHalt,
 	isUnlimitedAutonomousLimit,
 	MAX_SUBAGENT_KEEP_ALIVE_MS,
 	nextAutonomousContinuation,
+	recordAutonomousHalt,
 	refreshAutonomousQualityGates,
 	setAutonomousEnabled,
 	setAutonomousLimits,
@@ -1432,6 +1436,8 @@ export class AgentSession {
 	// re-prompting a waiting parent (and pause without consuming budget).
 	private _autonomousContinuationAwaitsRlmWork = false;
 	private _autonomousSubagentKeepAliveTimer: ReturnType<typeof setTimeout> | undefined = undefined;
+	/** Wall-clock watchdog: the bound that still fires when no turn boundary is reached. */
+	private _autonomousWallClockTimer: ReturnType<typeof setTimeout> | undefined = undefined;
 	// In-flight gate evaluation for an owed continuation; holds the promise so
 	// settlement sites never double-fire the resume.
 	private _autonomousContinuationResumeTask: Promise<void> | undefined = undefined;
@@ -1666,6 +1672,9 @@ export class AgentSession {
 			cwd: this._cwd,
 			defaultLimits: this.settingsManager.getAutonomousLimits(),
 		});
+		// The wall-clock bound must cover the whole run, including a stall that
+		// happens before the first assistant turn ever lands.
+		this._armAutonomousWallClock();
 		this._goalState = this._loadPersistedGoalState();
 		// Seed initial goal from CLI --goal flag, but only for top-level sessions
 		// and only when the branch contains only bootstrap entry types (model_change,
@@ -2463,6 +2472,8 @@ export class AgentSession {
 		if (command.kind === "on") {
 			setAutonomousEnabled(this._autonomousState, true, { cwd: this._cwd });
 			setAutonomousLimits(this._autonomousState, command.config);
+			// Re-arm against the new start time and window.
+			this._armAutonomousWallClock();
 			// Re-sync the keep-alive with the new window: a 0 setting must
 			// disarm an already-armed timer, and a shortened window must not
 			// keep the old one pending.
@@ -2472,6 +2483,7 @@ export class AgentSession {
 			}
 		} else if (command.kind === "off") {
 			setAutonomousEnabled(this._autonomousState, false);
+			this._disarmAutonomousWallClock();
 			this._clearQueuedAutonomousContinuations();
 			this._clearAutonomousContinuationAwait();
 		}
@@ -2750,6 +2762,107 @@ export class AgentSession {
 		this._autonomousSubagentKeepAliveTimer = undefined;
 	}
 
+	/**
+	 * Persist a budget halt to the session transcript.
+	 *
+	 * The transcript is the only durable readback surface: the process exit code
+	 * cannot say whether a run stopped on turns, tokens, or the wall clock, and
+	 * `daemon stats` does not exist. Written once per run via the idempotent
+	 * `recordAutonomousHalt`.
+	 */
+	private _recordAutonomousHalt(reason: AutonomousLimitReason): void {
+		const record = recordAutonomousHalt(this._autonomousState, reason);
+		if (!record) {
+			return;
+		}
+		const message = {
+			role: "custom" as const,
+			customType: AUTONOMOUS_HALT_CUSTOM_TYPE,
+			content: formatAutonomousHalt(record),
+			display: true,
+			details: record,
+			timestamp: record.haltedAt,
+		};
+		try {
+			this.agent.state.messages.push(message);
+			this.sessionManager.appendCustomMessageEntry(
+				message.customType,
+				message.content,
+				message.display,
+				message.details,
+			);
+			this._emit({ type: "message_start", message });
+			this._emit({ type: "message_end", message });
+		} catch {
+			// The halt itself must still take effect if persistence fails.
+		}
+	}
+
+	/**
+	 * Bind the autonomous budget MID-SEGMENT.
+	 *
+	 * `addAutonomousUsage` increments turns/tokens per assistant message, but the
+	 * limit was previously only consulted when deciding whether to start another
+	 * run segment. Nothing interrupted a segment already in flight, so a segment
+	 * that wanted 12 turns took 12 regardless of a cap of 5 — measured as a cap of
+	 * 18 permitting 37 turns. Checking here, at the agent loop's own per-turn
+	 * `shouldStopAfterTurn` boundary, makes the cap stop the very turn that
+	 * crosses it.
+	 */
+	private _enforceAutonomousLimitsAfterTurn(): boolean {
+		if (!this._autonomousState.enabled) {
+			return false;
+		}
+		const reason = autonomousLimitReason(this._autonomousState);
+		if (!reason) {
+			return false;
+		}
+		this._recordAutonomousHalt(reason);
+		return true;
+	}
+
+	/**
+	 * Wall-clock bound, independent of the turn/token counters.
+	 *
+	 * A counter-based cap can only fire on a turn boundary, so a run that hangs
+	 * without ever emitting another assistant message is unbounded by it. This
+	 * timer is the second, independent bound: it fires on elapsed time alone and
+	 * aborts the run wherever it is stuck.
+	 */
+	private _armAutonomousWallClock(): void {
+		this._disarmAutonomousWallClock();
+		if (!this._autonomousState.enabled) return;
+		const startedAt = this._autonomousState.startedAt;
+		const timeoutMs = this._autonomousState.limits.timeoutMs;
+		if (startedAt === undefined || !Number.isFinite(timeoutMs) || timeoutMs <= 0) return;
+		if (isUnlimitedAutonomousLimit(timeoutMs)) return;
+		const remaining = Math.max(0, startedAt + timeoutMs - Date.now());
+		// setTimeout clamps delays above 2^31-1 to 1ms, which would fire instantly.
+		if (remaining > MAX_SUBAGENT_KEEP_ALIVE_MS) return;
+		const timer = setTimeout(() => {
+			this._autonomousWallClockTimer = undefined;
+			this._fireAutonomousWallClock();
+		}, remaining);
+		// A pending watchdog must not hold the event loop open on its own.
+		timer.unref();
+		this._autonomousWallClockTimer = timer;
+	}
+
+	private _disarmAutonomousWallClock(): void {
+		if (this._autonomousWallClockTimer === undefined) return;
+		clearTimeout(this._autonomousWallClockTimer);
+		this._autonomousWallClockTimer = undefined;
+	}
+
+	private _fireAutonomousWallClock(): void {
+		if (!this._autonomousState.enabled || this._disposing || this._disposed) return;
+		if (!autonomousLimitReason(this._autonomousState)) return;
+		this._recordAutonomousHalt("timeoutMs");
+		// Unlike the turn-boundary check, there may be no upcoming boundary to
+		// return `true` at — the run is aborted where it stands.
+		this.requestAbort();
+	}
+
 	private _clearAutonomousContinuationAwait(): void {
 		this._autonomousContinuationAwaitsRlmWork = false;
 		this._disarmAutonomousSubagentKeepAlive();
@@ -2928,6 +3041,12 @@ export class AgentSession {
 	}
 
 	private async _shouldStopAfterTurn(context: ShouldStopAfterTurnContext): Promise<boolean> {
+		// Budget first: once a bound is crossed, no further work may be started,
+		// including the goal/refine/compaction bookkeeping below. This is the only
+		// place a cap can interrupt a run segment already in flight.
+		if (this._enforceAutonomousLimitsAfterTurn()) {
+			return true;
+		}
 		if (this._stopGoalContinuationForTerminalMessage(context.message)) {
 			return true;
 		}
@@ -4838,6 +4957,7 @@ export class AgentSession {
 			}
 			this._scheduledAutoRefineTimers.clear();
 			this._disarmAutonomousSubagentKeepAlive();
+			this._disarmAutonomousWallClock();
 			this._serializedPlanInFlight = undefined;
 			this._serializedExplicitRefineOptions = undefined;
 			this._pendingRequestedRefine = undefined;

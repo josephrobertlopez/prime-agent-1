@@ -8,7 +8,12 @@
 
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.js";
-import { type AgentAutonomousStatus, type AutonomousLimitReason, autonomousLimitReason } from "../core/autonomous.js";
+import {
+	type AgentAutonomousStatus,
+	type AutonomousLimitReason,
+	autonomousLimitReason,
+	formatAutonomousHalt,
+} from "../core/autonomous.js";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.js";
 import { killTrackedDetachedChildren } from "../utils/shell.js";
 import { InProcessAgentConnection } from "./agent-connection/in-process-agent-connection.js";
@@ -27,9 +32,25 @@ export interface PrintModeOptions {
 	initialMessage?: string;
 	/** Images to attach to the initial message */
 	initialImages?: ImageContent[];
+	/**
+	 * Autonomous wall-clock budget, in ms. The session's own watchdog aborts the
+	 * run at this deadline; this mode arms a hard backstop at twice it, for the
+	 * case where the stall is somewhere `abort()` cannot reach (a wedged child
+	 * process, a socket that never settles). Without the backstop a hung run is
+	 * unbounded no matter what the counters say.
+	 */
+	hardTimeoutMs?: number;
 }
 
+/** Multiple of the autonomous wall-clock budget at which the process is forced down. */
+const HARD_TIMEOUT_MULTIPLIER = 2;
+
 function describeAutonomousLimit(status: AgentAutonomousStatus, reason: AutonomousLimitReason): string {
+	// Prefer the recorded halt: it captured the counters at the moment the bound
+	// actually bit, rather than re-deriving them after teardown.
+	if (status.halt) {
+		return `${status.halt.label}: ${formatAutonomousHalt(status.halt)}`;
+	}
 	if (reason === "maxContinuations") {
 		return `maxContinuations reached (${status.continuationsUsed}/${status.limits.maxContinuations})`;
 	}
@@ -64,11 +85,27 @@ async function runPrintModeWithConnectionInternal(
 	options: PrintModeOptions,
 	bindHeadlessExtensions?: () => Promise<void>,
 ): Promise<number> {
-	const { mode, messages = [], initialMessage, initialImages } = options;
+	const { mode, messages = [], initialMessage, initialImages, hardTimeoutMs } = options;
 	let exitCode = 0;
 	let disposed = false;
 	let unsubscribe: (() => void) | undefined;
 	const signalCleanupHandlers: Array<() => void> = [];
+
+	// Hard backstop. Deliberately NOT unref'd: its whole job is to fire while the
+	// process is otherwise wedged. Cleared in `finally` on every normal exit.
+	let hardTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
+	if (hardTimeoutMs !== undefined && Number.isFinite(hardTimeoutMs) && hardTimeoutMs > 0) {
+		const deadline = hardTimeoutMs * HARD_TIMEOUT_MULTIPLIER;
+		hardTimeoutTimer = setTimeout(() => {
+			console.error(
+				`[autonomous-halt: timeout] hard wall-clock backstop fired after ${deadline}ms ` +
+					`(${HARD_TIMEOUT_MULTIPLIER}x the ${hardTimeoutMs}ms autonomous timeout); forcing exit.`,
+			);
+			killTrackedDetachedChildren();
+			// A graceful dispose is exactly what is already stuck, so do not await it.
+			process.exit(1);
+		}, deadline);
+	}
 
 	const disposeConnection = async (): Promise<void> => {
 		if (disposed) return;
@@ -163,6 +200,9 @@ async function runPrintModeWithConnectionInternal(
 		console.error(error instanceof Error ? error.message : String(error));
 		return 1;
 	} finally {
+		if (hardTimeoutTimer) {
+			clearTimeout(hardTimeoutTimer);
+		}
 		for (const cleanup of signalCleanupHandlers) {
 			cleanup();
 		}

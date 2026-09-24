@@ -3,6 +3,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { AgentSession } from "../core/agent-session.js";
 import {
 	type AgentAutonomousStatus,
+	AUTONOMOUS_HALT_CUSTOM_TYPE,
 	autonomousLimitReason,
 	buildAutonomousGateFailureContinuation,
 } from "../core/autonomous.js";
@@ -45,7 +46,10 @@ export function selectHeadlessTerminalResult(messages: readonly AgentMessage[]):
 			(message.customType === COMPACTION_OUTCOME_CUSTOM_TYPE ||
 				message.customType === REFINEMENT_OUTCOME_CUSTOM_TYPE ||
 				message.customType === REFINEMENT_NOTICE_CUSTOM_TYPE ||
-				message.customType === HARNESS_DIGEST_CUSTOM_TYPE)
+				message.customType === HARNESS_DIGEST_CUSTOM_TYPE ||
+				// A budget halt is a trailing annotation, not the run's result;
+				// it must not hide the assistant message that preceded it.
+				message.customType === AUTONOMOUS_HALT_CUSTOM_TYPE)
 		) {
 			index--;
 			continue;
