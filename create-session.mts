@@ -52,6 +52,13 @@ if (wantJson) cmd.push("--json");
 try {
   // Top-level await is the whole reason this is a .mts and not a .js require.
   await handleDaemonCommand(cmd);
+  // Verify the session was actually created by checking process.exitCode.
+  // handleDaemonCommand sets exitCode to 1 on failure but still returns true,
+  // so we must check the exit code explicitly.
+  if (process.exitCode && process.exitCode !== 0) {
+    const code = process.exitCode || 1;
+    process.exit(code);
+  }
 } catch (err) {
   // Fail LOUD and non-zero. A headless caller must never read a failed create
   // as success — that is the false-green shape this repo exists to kill.
